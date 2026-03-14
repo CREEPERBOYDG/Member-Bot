@@ -1,3 +1,16 @@
-.env
-users.json
+# Python cache files
 __pycache__/
+*.pyc
+*.pyo
+
+# Environment variables
+.env
+
+# Logs
+*.log
+
+# Persistent storage (optional, if not tracked in Git)
+/mnt/data/
+
+# VS Code settings (optional)
+.vscode/
