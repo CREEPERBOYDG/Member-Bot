@@ -20,7 +20,7 @@ API = "https://discord.com/api"
 
 # ------------------ PERSISTENT STORAGE ------------------ #
 # Render persistent disk path
-PERSISTENT_PATH = "/mnt/data/users.txt"
+PERSISTENT_PATH = "users.txt"
 
 # Ensure the folder exists
 os.makedirs(os.path.dirname(PERSISTENT_PATH), exist_ok=True)
