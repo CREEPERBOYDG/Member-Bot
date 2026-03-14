@@ -8,18 +8,24 @@ from flask import Flask, request, redirect
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
+
+# ------------------ LOAD ENV ------------------ #
 load_dotenv()
-# ------------------ ENV VARIABLES ------------------ #
 
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 REDIRECT_URI = os.getenv("REDIRECT_URI")
-
 API = "https://discord.com/api"
 
-# ------------------ FLASK APP ------------------ #
+# ------------------ PERSISTENT STORAGE ------------------ #
+# Render persistent disk path
+PERSISTENT_PATH = "/mnt/data/users.txt"
 
+# Ensure the folder exists
+os.makedirs(os.path.dirname(PERSISTENT_PATH), exist_ok=True)
+
+# ------------------ FLASK APP ------------------ #
 app = Flask(__name__)
 
 @app.route("/")
@@ -35,6 +41,8 @@ def login():
 @app.route("/callback")
 def callback():
     code = request.args.get("code")
+    if not code:
+        return "No code provided."
 
     data = {
         "client_id": CLIENT_ID,
@@ -60,19 +68,26 @@ def callback():
 
     user_id = user["id"]
 
-    with open("users.txt", "a") as f:
+    # Append to persistent users.txt
+    with open(PERSISTENT_PATH, "a") as f:
         f.write(f"{user_id}:{access_token}\n")
 
     return "Authorization successful!"
 
-# ------------------ RUN FLASK ------------------ #
+# Optional route to view authorized users (for debug)
+@app.route("/users")
+def show_users():
+    if os.path.exists(PERSISTENT_PATH):
+        with open(PERSISTENT_PATH, "r") as f:
+            return "<br>".join(f.read().splitlines())
+    return "No users yet."
 
+# ------------------ RUN FLASK ------------------ #
 def run_flask():
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 10000))  # Render assigns PORT automatically
     app.run(host="0.0.0.0", port=port)
 
 # ------------------ DISCORD BOT ------------------ #
-
 intents = discord.Intents.default()
 
 class MyClient(discord.Client):
@@ -96,30 +111,23 @@ async def on_ready():
 )
 @app_commands.describe(server_id="The ID of the server to join")
 async def join(interaction: discord.Interaction, server_id: str):
-
     await interaction.response.defer()
     added = 0
 
     try:
-        with open("users.txt", "r") as f:
+        with open(PERSISTENT_PATH, "r") as f:
             users = [line.strip() for line in f if line.strip()]
 
         async with aiohttp.ClientSession() as session:
-
             tasks = []
 
             for line in users:
                 user_id, access_token = line.split(":")
-
                 url = f"{API}/guilds/{server_id}/members/{user_id}"
-
                 headers = {"Authorization": f"Bot {BOT_TOKEN}"}
-
                 json_data = {"access_token": access_token}
 
-                tasks.append(
-                    session.put(url, json=json_data, headers=headers)
-                )
+                tasks.append(session.put(url, json=json_data, headers=headers))
 
             responses = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -136,12 +144,14 @@ async def join(interaction: discord.Interaction, server_id: str):
         )
 
     except FileNotFoundError:
-        await interaction.followup.send("users.txt not found.")
+        await interaction.followup.send("No authorized users found.")
 
 # ------------------ START SERVICES ------------------ #
+if __name__ == "__main__":
+    # Run Flask in a separate thread
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
 
-flask_thread = threading.Thread(target=run_flask)
-flask_thread.daemon = True
-flask_thread.start()
-
-client.run(BOT_TOKEN)
+    # Run Discord bot
+    client.run(BOT_TOKEN)
